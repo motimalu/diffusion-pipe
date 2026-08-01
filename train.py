@@ -366,6 +366,9 @@ if __name__ == '__main__':
     elif model_type == 'ernie_image':
         from models import ernie_image
         model = ernie_image.ErnieImagePipeline(config)
+    elif model_type == 'mage_flow':
+        from models import mage_flow
+        model = mage_flow.MageFlowPipeline(config)
     elif model_type == 'ltx2':
         from models import ltx2
         model = ltx2.LTX2Pipeline(config)
