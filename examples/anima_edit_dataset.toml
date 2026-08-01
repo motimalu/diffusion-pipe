@@ -1,0 +1,24 @@
+resolutions = [512]
+
+enable_ar_bucket = true
+min_ar = 0.5
+max_ar = 2.0
+num_ar_buckets = 9
+
+[[directory]]
+# The target images go in here. These are the images that the model will learn to produce.
+path = '/home/anon/data/images/anima-edit/target'
+# The control/source images go in here, with the same name as the corresponding target images.
+# Every target image must have a corresponding control image or it will fail.
+control_path = '/home/anon/data/images/anima-edit/source'
+# For multi-reference models, use control_paths instead. Every listed directory must
+# contain one matching control image for each target image.
+# control_paths = [
+#     '/home/anon/data/images/anima-edit/person_ref',
+#     '/home/anon/data/images/anima-edit/style_ref',
+# ]
+
+# You can train on normal t2i datasets at the same time. But they have to be in a different directory.
+
+# [[directory]]
+# path = '/home/anon/data/images/normal_t2i_dataset'

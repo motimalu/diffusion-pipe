@@ -563,6 +563,16 @@ Notes:
   - Setting `llm_adapter_lr=0` disables training it entirely. This probably makes training more stable for small datasets.
   - If you have a larger dataset or a lot of brand-new concepts, you can try training the llm_adapter and see if it helps.
 
+### Anima Edit Datasets
+
+Anima supports edit datasets using `control_path` or `control_paths` (multi-reference) in the directory config. Control images are concatenated along the temporal dimension before being fed into the DiT, matching the model's expected 5D input shape `[B, C, T, H, W]`.
+
+See the [Anima edit example dataset config](../examples/anima_edit_dataset.toml) for how to configure the dataset.
+
+**IMPORTANT**: The control images should be approximately the same aspect ratio as the target images. All of the aspect ratio and size bucketing is done with respect to the target images. Then, the control image is resized and cropped to match the target image size. If the aspect ratio of the control image is very different from the target image, it will be cropping away a lot of the control image.
+
+For multi-reference training, use `control_paths` instead of `control_path`. Each directory in the list must contain files with stems matching the target images, and the images are passed to the model in list order.
+
 Anima LoRAs are saved in ComfyUI format.
 
 

@@ -346,11 +346,26 @@ class CosmosPredict2Pipeline(BasePipeline):
         )
 
     def get_call_vae_fn(self, vae):
-        def fn(tensor):
+        def fn(tensor, control_tensor=None):
             p = next(vae.parameters())
             tensor = tensor.to(p.device, p.dtype)
             latents = vae_encode(tensor, self.vae)
-            return {'latents': latents}
+            result = {'latents': latents}
+            if control_tensor is not None:
+                control_tensor = control_tensor.to(p.device, p.dtype)
+                if control_tensor.ndim == 6:
+                    # Multi-control: [B, num_controls, C, T, H, W] — flatten, encode, unflatten
+                    bs, num_controls = control_tensor.shape[:2]
+                    control_tensor = control_tensor.flatten(0, 1)  # [B*num_controls, C, T, H, W]
+                    control_latents = vae_encode(control_tensor, self.vae)
+                    control_latents = control_latents.unflatten(0, (bs, num_controls))  # [B, nC, C, T_latent, H_latent, W_latent]
+                else:
+                    # Single control: already 5D [B, C, T, H, W] (or 4D [B, C, H, W])
+                    if control_tensor.ndim == 4:
+                        control_tensor = control_tensor.unsqueeze(2)
+                    control_latents = vae_encode(control_tensor, self.vae)
+                result['control_latents'] = control_latents
+            return result
         return fn
 
     def get_call_text_encoder_fn(self, text_encoder):
@@ -419,7 +434,28 @@ class CosmosPredict2Pipeline(BasePipeline):
         target = noise - latents
         t = t.view(-1, 1)
 
-        return (noisy_latents, t, *prompt_embeds_or_batch_encoding), (target, mask)
+        # Handle control latents for edit / multi-control datasets
+        if 'control_latents' in inputs:
+            control_latents = inputs['control_latents'].float()
+            # Original target temporal dimension (for cropping model output)
+            # Shape: [B] so it survives split_batch which requires >= 1-D tensors
+            target_t = torch.full((bs,), noisy_latents.shape[2], dtype=torch.long, device=noisy_latents.device)
+            if control_latents.ndim == 6:
+                # Multi-control: [B, num_controls, C, T, H, W]
+                # Flatten controls into the temporal dimension: [B, C, num_controls, H, W]
+                num_controls = control_latents.shape[1]
+                # [B, nC, C, 1, H, W] -> [B, nC, C, H, W] (squeeze temporal=1)
+                control_latents = control_latents.squeeze(3)
+                # [B, nC, C, H, W] -> [B, C, nC, H, W]
+                control_latents = control_latents.permute(0, 2, 1, 3, 4)
+            elif control_latents.ndim == 4:
+                control_latents = control_latents.unsqueeze(2)  # [B, C, H, W] -> [B, C, 1, H, W]
+            # else: already 5D [B, C, T, H, W], use as-is
+            noisy_latents = torch.cat([noisy_latents, control_latents], dim=2)
+        else:
+            target_t = torch.full((bs,), -1, dtype=torch.long, device=noisy_latents.device)
+
+        return (noisy_latents, t, *prompt_embeds_or_batch_encoding, target_t), (target, mask)
 
     def to_layers(self):
         transformer = self.transformer
@@ -559,7 +595,9 @@ class InitialLayer(nn.Module):
 
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
-        x_B_C_T_H_W, timesteps_B_T, *prompt_embeds_or_batch_encoding = inputs
+        x_B_C_T_H_W, timesteps_B_T, *rest = inputs
+        target_t = rest[-1]
+        prompt_embeds_or_batch_encoding = rest[:-1]
 
         if torch.is_floating_point(prompt_embeds_or_batch_encoding[0]):
             crossattn_emb, attn_mask, t5_input_ids, t5_attn_mask = prompt_embeds_or_batch_encoding
@@ -582,7 +620,7 @@ class InitialLayer(nn.Module):
         t_embedding_B_T_D, adaln_lora_B_T_3D = self.t_embedder(timesteps_B_T)
         t_embedding_B_T_D = self.t_embedding_norm(t_embedding_B_T_D)
 
-        outputs =  make_contiguous(x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, t5_input_ids, attn_mask, t5_attn_mask, rope_emb_L_1_1_D, adaln_lora_B_T_3D, timesteps_B_T)
+        outputs =  make_contiguous(x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, t5_input_ids, attn_mask, t5_attn_mask, rope_emb_L_1_1_D, adaln_lora_B_T_3D, timesteps_B_T, target_t)
         for tensor in outputs:
             if torch.is_floating_point(tensor):
                 tensor.requires_grad_(True)
@@ -596,7 +634,7 @@ class LLMAdapterLayer(nn.Module):
 
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
-        x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, t5_input_ids, attn_mask, t5_attn_mask, rope_emb_L_1_1_D, adaln_lora_B_T_3D, timesteps_B_T = inputs
+        x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, t5_input_ids, attn_mask, t5_attn_mask, rope_emb_L_1_1_D, adaln_lora_B_T_3D, timesteps_B_T, target_t = inputs
 
         if self.llm_adapter is not None:
             crossattn_emb = self.llm_adapter(
@@ -607,7 +645,7 @@ class LLMAdapterLayer(nn.Module):
             )
             crossattn_emb[~t5_attn_mask.bool()] = 0
 
-        return make_contiguous(x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D, adaln_lora_B_T_3D, timesteps_B_T)
+        return make_contiguous(x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D, adaln_lora_B_T_3D, timesteps_B_T, target_t)
 
 
 class TransformerLayer(nn.Module):
@@ -619,13 +657,13 @@ class TransformerLayer(nn.Module):
 
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
-        x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D, adaln_lora_B_T_3D, timesteps_B_T = inputs
+        x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D, adaln_lora_B_T_3D, timesteps_B_T, target_t = inputs
 
         self.offloader.wait_for_block(self.block_idx)
         x_B_T_H_W_D = self.block(x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D=rope_emb_L_1_1_D, adaln_lora_B_T_3D=adaln_lora_B_T_3D)
         self.offloader.submit_move_blocks_forward(self.block_idx)
 
-        return make_contiguous(x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D, adaln_lora_B_T_3D, timesteps_B_T)
+        return make_contiguous(x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D, adaln_lora_B_T_3D, timesteps_B_T, target_t)
 
 
 class FinalLayer(nn.Module):
@@ -639,7 +677,10 @@ class FinalLayer(nn.Module):
 
     @torch.autocast('cuda', dtype=AUTOCAST_DTYPE)
     def forward(self, inputs):
-        x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D, adaln_lora_B_T_3D, timesteps_B_T = inputs
+        x_B_T_H_W_D, t_embedding_B_T_D, crossattn_emb, rope_emb_L_1_1_D, adaln_lora_B_T_3D, timesteps_B_T, target_t = inputs
         x_B_T_H_W_O = self.final_layer(x_B_T_H_W_D, t_embedding_B_T_D, adaln_lora_B_T_3D=adaln_lora_B_T_3D)
+        # Crop output to original target temporal dimension if control latents were used
+        if target_t[0].item() > 0:
+            x_B_T_H_W_O = x_B_T_H_W_O[:, :target_t[0].item(), :, :]
         net_output_B_C_T_H_W = self.unpatchify(x_B_T_H_W_O)
         return net_output_B_C_T_H_W
