@@ -148,19 +148,20 @@ class Saver:
         # Look at some simple "signal files" the user can write to save and optionally quit manually
         should_manually_save = False
         should_manually_quit = False
-        save_signal_file = self.save_root / 'save'
-        save_quit_signal_file = self.save_root / 'save_quit'
-        if save_signal_file.exists() and save_signal_file.is_file():
-            should_manually_save = True
-            dist.barrier()
-            if is_main_process():
+        if is_main_process():
+            save_signal_file = self.save_root / 'save'
+            save_quit_signal_file = self.save_root / 'save_quit'
+            if save_signal_file.exists() and save_signal_file.is_file():
+                should_manually_save = True
                 os.remove(save_signal_file)
-        elif save_quit_signal_file.exists() and save_quit_signal_file.is_file():
-            should_manually_save = True
-            should_manually_quit = True
-            dist.barrier()
-            if is_main_process():
+            elif save_quit_signal_file.exists() and save_quit_signal_file.is_file():
+                should_manually_save = True
+                should_manually_quit = True
                 os.remove(save_quit_signal_file)
+
+        signal_list = [should_manually_save, should_manually_quit]
+        torch.distributed.broadcast_object_list(signal_list, src=0)
+        should_manually_save, should_manually_quit = signal_list
 
         if 'save_every_n_steps' in self.config and step % self.config['save_every_n_steps'] == 0:
             self.save_model(f'step{step}')
@@ -168,10 +169,14 @@ class Saver:
 
         if need_to_checkpoint(self.config) or should_manually_save:
             self.save_checkpoint(step, examples)
+            self.save_model(f'step{step}')
             checkpointed = True
+            saved = True
 
         if should_manually_quit:
-            print('Manually quitting')
+            if is_main_process():
+                print('Manually quitting')
+            dist.barrier()
             sys.exit()
 
         return checkpointed, saved
