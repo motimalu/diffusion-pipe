@@ -12,6 +12,45 @@ from utils.offloading import ModelOffloader
 import comfy.ldm.common_dit
 
 
+def _register_ernie_rope_autograd():
+    # comfy_kitchen.apply_rope_split_half is a custom op without a registered
+    # autograd formula (ComfyUI only ever uses it for inference), so running
+    # backward through it raises:
+    #   RuntimeError: Trying to backward through
+    #       comfy_kitchen.apply_rope_split_half.default but no autograd formula
+    #       was registered.
+    # The ernie attention training branch (comfy.ldm.ernie.model) calls this op,
+    # so register an analytic backward matching the kernel layout:
+    # split-half RoPE, where pair i uses elements [i] and [i + head_dim // 2]
+    # and is rotated by the 2x2 matrix at freqs_cis[..., i] (computed in
+    # freqs_cis's dtype, cast back to the input dtype, like the kernel does).
+    import comfy_kitchen  # noqa: F401  # ensure the op is registered
+
+    def _setup_context(ctx, inputs, output):
+        xq, xk, freqs_cis = inputs
+        ctx.save_for_backward(xq, xk, freqs_cis)
+
+    def _backward(ctx, grad_q, grad_k):
+        xq, xk, freqs_cis = ctx.saved_tensors
+        n = xq.shape[-1] // 2
+
+        def backprop(grad, x):
+            g0 = grad[..., :n].to(freqs_cis.dtype)
+            g1 = grad[..., n:].to(freqs_cis.dtype)
+            dx0 = freqs_cis[..., 0, 0] * g0 + freqs_cis[..., 1, 0] * g1
+            dx1 = freqs_cis[..., 0, 1] * g0 + freqs_cis[..., 1, 1] * g1
+            return torch.cat([dx0, dx1], dim=-1).to(x.dtype)
+
+        return backprop(grad_q, xq), backprop(grad_k, xk), None
+
+    torch.library.register_autograd(
+        'comfy_kitchen::apply_rope_split_half', _backward, setup_context=_setup_context
+    )
+
+
+_register_ernie_rope_autograd()
+
+
 class ErnieImagePipeline(ComfyPipeline):
     name = 'ernie_image'
     checkpointable_layers = ['InitialLayer', 'TransformerLayer']
@@ -77,6 +116,19 @@ class ErnieImagePipeline(ComfyPipeline):
         if shift := self.model_config.get('shift', None):
             t = (t * shift) / (1 + (shift - 1) * t)
         elif self.model_config.get('flux_shift', False):
+            # TODO: validate this change will result in the desired shift regime for the multi-res training:
+            # 512x512: Shift = 1.0
+            # 768x768: Shift = 2.25
+            # 1024x1024: Shift = 4.0
+            # 1280x1280: Shift = 6.25
+            # 1536x1536: Shift = 9.0
+
+            # Anchor: Shift = 4.0 at 1024x1024 (latent size 128x128 -> (128//2)*(128//2) = 4096 tokens)
+            # tokens = (h // 2) * (w // 2)
+            # shift = 4.0 * (tokens / 4096.0)
+            # t = (t * shift) / (1 + (shift - 1) * t)
+
+            # Function before for flux_shift (log scale - how does it differ from the above?)
             mu = get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
             t = time_shift(mu, 1.0, t)
 
