@@ -27,7 +27,7 @@ class AdamW8bitKahan(bitsandbytes.optim.AdamW8bit):
         state["step"] += 1
         step = state["step"]
 
-        if config["percentile_clipping"] < 100:
+        if config.get("percentile_clipping", 100) < 100:
             current_gnorm, clip_value, gnorm_scale = F.percentile_clipping(
                 grad,
                 state["gnorm_vec"],
@@ -69,7 +69,7 @@ class AdamW8bitKahan(bitsandbytes.optim.AdamW8bit):
                 skip_zeros=config["skip_zeros"],
             )
 
-        elif state["state1"].dtype == torch.uint8 and not config["block_wise"]:
+        elif state["state1"].dtype == torch.uint8 and not config.get("block_wise", True):
             F.optimizer_update_8bit(
                 self.optimizer_name,
                 grad,
@@ -96,7 +96,7 @@ class AdamW8bitKahan(bitsandbytes.optim.AdamW8bit):
             # swap maxes
             state["max1"], state["new_max1"] = state["new_max1"], state["max1"]
             state["max2"], state["new_max2"] = state["new_max2"], state["max2"]
-        elif state["state1"].dtype == torch.uint8 and config["block_wise"]:
+        elif state["state1"].dtype == torch.uint8 and config.get("block_wise", True):
             F.optimizer_update_8bit_blockwise(
                 self.optimizer_name,
                 grad,
