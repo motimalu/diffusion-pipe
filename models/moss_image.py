@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from models.base import ComfyPipeline, make_contiguous
 from utils.common import AUTOCAST_DTYPE, get_lin_function, time_shift
+from utils.moss_timesteps import inverse_cdf
 from utils.offloading import ModelOffloader
 import comfy.latent_formats
 from comfy.ldm.flux.layers import timestep_embedding
@@ -174,7 +175,7 @@ class MossImagePipeline(ComfyPipeline):
 
         if timestep_sample_method == 'logit_normal':
             dist = torch.distributions.normal.Normal(0, 1)
-        elif timestep_sample_method == 'uniform':
+        elif timestep_sample_method in ('uniform', 'moss'):
             dist = torch.distributions.uniform.Uniform(0, 1)
         else:
             raise NotImplementedError()
@@ -188,6 +189,8 @@ class MossImagePipeline(ComfyPipeline):
             sigmoid_scale = self.model_config.get('sigmoid_scale', 1.0)
             t = t * sigmoid_scale
             t = torch.sigmoid(t)
+        elif timestep_sample_method == 'moss':
+            t = inverse_cdf(t, self.model_config)
 
         if shift := self.model_config.get('shift', None):
             t = (t * shift) / (1 + (shift - 1) * t)

@@ -124,6 +124,16 @@ def get_lin_function(x1: float = 256, y1: float = 0.5, x2: float = 4096, y2: flo
 def get_t_distribution(model_config):
     timestep_sample_method = model_config.get('timestep_sample_method', 'logit_normal')
 
+    n_buckets = 10_000
+    delta = 1 / n_buckets
+    min_quantile = delta
+    max_quantile = 1 - delta
+    quantiles = torch.linspace(min_quantile, max_quantile, n_buckets)
+
+    if timestep_sample_method == 'moss':
+        from .moss_timesteps import inverse_cdf
+        return inverse_cdf(quantiles, model_config)
+
     if timestep_sample_method == 'logit_normal':
         dist = torch.distributions.normal.Normal(0, 1)
     elif timestep_sample_method == 'uniform':
@@ -131,11 +141,6 @@ def get_t_distribution(model_config):
     else:
         raise NotImplementedError()
 
-    n_buckets = 10_000
-    delta = 1 / n_buckets
-    min_quantile = delta
-    max_quantile = 1 - delta
-    quantiles = torch.linspace(min_quantile, max_quantile, n_buckets)
     t = dist.icdf(quantiles)
 
     if timestep_sample_method == 'logit_normal':

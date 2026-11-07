@@ -112,6 +112,13 @@ def set_config_defaults(config):
         model_config['diffusion_model_dtype'] = DTYPE_MAP[diffusion_model_dtype]
     model_config.setdefault('guidance', 1.0)
 
+    # Kohaku MOSS timestep sampling locks the shared shift/scale settings; reject
+    # conflicting values before any heavy loading, like the reference trainer does at
+    # config parse time.
+    if model_config.get('timestep_sample_method', 'logit_normal') == 'moss':
+        from utils.moss_timesteps import validate_moss_sampling
+        validate_moss_sampling(model_config)
+
     if 'adapter' in config:
         adapter_config = config['adapter']
         adapter_type = adapter_config['type']

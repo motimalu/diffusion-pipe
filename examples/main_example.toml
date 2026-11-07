@@ -127,8 +127,20 @@ clip_path = '/data2/imagegen_models/hunyuan_video_comfyui/clip-vit-large-patch14
 dtype = 'bfloat16'
 # Hunyuan Video supports fp8 for the transformer when training LoRA.
 transformer_dtype = 'float8'
-# How to sample timesteps to train on. Can be logit_normal or uniform.
+# How to sample timesteps to train on. Can be logit_normal, uniform, or moss.
+# logit_normal samples a sigmoid of normal noise; uniform is flat.
+# moss uses Kohaku's static MOSS recipe: a truncated/rescaled logit-normal distribution
+# on a discrete grid including pure noise (t=0 is never sampled). It locks
+# sigmoid_scale=1 and shift=1 (or unset) and disables flux_shift; moss_std controls
+# its width. All other moss_* settings below are optional and shown at their defaults.
 timestep_sample_method = 'logit_normal'
+# [moss options, only read when timestep_sample_method = 'moss']
+#moss_mu = -1.09          # mean of the normal before the inverted sigmoid; more negative biases toward noise
+#moss_std = 0.95          # distribution width, independent of sigmoid_scale
+#moss_cutoff = 0.95       # condition the base distribution below this cutoff, then rescale onto the full grid
+#moss_uniform_mix = 0.01  # fraction mixed with a uniform grid distribution
+#moss_p_full = 0.0        # extra probability assigned to t=1 (the final grid bin already has nonzero mass)
+#moss_steps = 1000        # number of discrete timesteps j/steps, j=1..steps (not inference steps)
 
 # For models that support full fine tuning, simply delete or comment out the [adapter] table to FFT.
 [adapter]
